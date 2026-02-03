@@ -1,63 +1,65 @@
 #include <Arduino.h>
 
-// ---- Pins (from your header, joystick ignored) ----
-#define M1_FWD  13
-#define M1_BKWD 12
-#define M2_FWD  14
-#define M2_BKWD 27
-#define M3_FWD  26
-#define M3_BKWD 25
-#define M4_FWD  33
-#define M4_BKWD 32
+// ================== YOUR CONFIRMED PINS ==================
+#define FL_FWD  18
+#define FL_BKWD 19
 
-// ---- PWM config ----
+#define FR_FWD  16
+#define FR_BKWD 17
+
+#define BL_FWD  14
+#define BL_BKWD 27
+
+#define BR_FWD  13
+#define BR_BKWD 12
+
+// ================== PWM CONFIG ==================
 static const int PWM_FREQ = 20000;  // 20 kHz
-static const int PWM_RES  = 8;      // 0-255
+static const int PWM_RES  = 8;      // 0..255
 
-// LEDC channels (ESP32 has many; we’ll assign 8 total)
-static const int CH_M1_FWD  = 0;
-static const int CH_M1_BKWD = 1;
-static const int CH_M2_FWD  = 2;
-static const int CH_M2_BKWD = 3;
-static const int CH_M3_FWD  = 4;
-static const int CH_M3_BKWD = 5;
-static const int CH_M4_FWD  = 6;
-static const int CH_M4_BKWD = 7;
+// LEDC channels (8 pins => 8 channels)
+static const int CH_FL_FWD  = 0;
+static const int CH_FL_BKWD = 1;
+static const int CH_FR_FWD  = 2;
+static const int CH_FR_BKWD = 3;
+static const int CH_BL_FWD  = 4;
+static const int CH_BL_BKWD = 5;
+static const int CH_BR_FWD  = 6;
+static const int CH_BR_BKWD = 7;
 
-// ---- Safety + scaling ----
-static const float MAX_LIN = 0.5f;     // m/s (just used for scaling)
-static const float MAX_ANG = 1.5f;     // rad/s (just used for scaling)
+// ================== CMD LIMITS + DEADMAN ==================
+static const float MAX_VX = 0.50f;   // m/s (for scaling)
+static const float MAX_VY = 0.50f;   // m/s
+static const float MAX_WZ = 1.50f;   // rad/s
 static const uint32_t DEADMAN_MS = 500;
 
-// Current commanded velocities
-static float cmd_lin = 0.0f;
-static float cmd_ang = 0.0f;
+static float cmd_vx = 0.0f;
+static float cmd_vy = 0.0f;
+static float cmd_wz = 0.0f;
 static uint32_t last_cmd_ms = 0;
 
-// Utility clamp
-static float clampf(float x, float lo, float hi) {
+// ================== HELPERS ==================
+static inline int clampi(int x, int lo, int hi) {
   if (x < lo) return lo;
   if (x > hi) return hi;
   return x;
 }
 
-// Convert [-1..1] to PWM [0..255]
-static uint8_t dutyFromNorm(float n) {
-  n = clampf(n, -1.0f, 1.0f);
-  return (uint8_t)(fabsf(n) * 255.0f);
+static void setupPinPwm(int pin, int ch) {
+  ledcSetup(ch, PWM_FREQ, PWM_RES);
+  ledcAttachPin(pin, ch);
+  ledcWrite(ch, 0);
 }
 
-// Set one motor with signed command in [-1..1]
-static void setMotor(int ch_fwd, int ch_bkwd, float u) {
-  u = clampf(u, -1.0f, 1.0f);
-  uint8_t duty = dutyFromNorm(u);
-
-  if (u > 0.0f) {
-    ledcWrite(ch_fwd, duty);
+// set one wheel with signed pwm in [-255..255]
+static void setWheel(int ch_fwd, int ch_bkwd, int pwm) {
+  pwm = clampi(pwm, -255, 255);
+  if (pwm > 0) {
     ledcWrite(ch_bkwd, 0);
-  } else if (u < 0.0f) {
+    ledcWrite(ch_fwd, pwm);
+  } else if (pwm < 0) {
     ledcWrite(ch_fwd, 0);
-    ledcWrite(ch_bkwd, duty);
+    ledcWrite(ch_bkwd, -pwm);
   } else {
     ledcWrite(ch_fwd, 0);
     ledcWrite(ch_bkwd, 0);
@@ -65,49 +67,26 @@ static void setMotor(int ch_fwd, int ch_bkwd, float u) {
 }
 
 static void stopAll() {
-  setMotor(CH_M1_FWD, CH_M1_BKWD, 0);
-  setMotor(CH_M2_FWD, CH_M2_BKWD, 0);
-  setMotor(CH_M3_FWD, CH_M3_BKWD, 0);
-  setMotor(CH_M4_FWD, CH_M4_BKWD, 0);
+  setWheel(CH_FL_FWD, CH_FL_BKWD, 0);
+  setWheel(CH_FR_FWD, CH_FR_BKWD, 0);
+  setWheel(CH_BL_FWD, CH_BL_BKWD, 0);
+  setWheel(CH_BR_FWD, CH_BR_BKWD, 0);
 }
 
-// Mix cmd_vel (lin, ang) into left/right normalized commands
-static void applyCmdVel(float lin, float ang) {
-  // Normalize lin/ang into roughly [-1..1] ranges
-  float lin_n = clampf(lin / MAX_LIN, -1.0f, 1.0f);
-  float ang_n = clampf(ang / MAX_ANG, -1.0f, 1.0f);
+// Parse: "V,vx,vy,wz\n"
+static bool parseCmdLine(const String &line, float &vx, float &vy, float &wz) {
+  if (line.length() < 2) return false;
+  if (line[0] != 'V') return false;
 
-  // Differential mixing
-  float left  = lin_n - ang_n;
-  float right = lin_n + ang_n;
+  // Expect commas
+  int c1 = line.indexOf(',');
+  int c2 = line.indexOf(',', c1 + 1);
+  int c3 = line.indexOf(',', c2 + 1);
+  if (c1 < 0 || c2 < 0 || c3 < 0) return false;
 
-  // Clamp after mixing
-  left  = clampf(left,  -1.0f, 1.0f);
-  right = clampf(right, -1.0f, 1.0f);
-
-  // Assign: left = M1 + M3, right = M2 + M4
-  setMotor(CH_M1_FWD, CH_M1_BKWD, left);
-  setMotor(CH_M3_FWD, CH_M3_BKWD, left);
-
-  setMotor(CH_M2_FWD, CH_M2_BKWD, right);
-  setMotor(CH_M4_FWD, CH_M4_BKWD, right);
-}
-
-// Parse line: "V,lin,ang"
-static bool parseVelLine(const String& line, float &lin_out, float &ang_out) {
-  // Basic format check
-  if (line.length() < 3) return false;
-  if (line.charAt(0) != 'V') return false;
-  if (line.charAt(1) != ',') return false;
-
-  int comma2 = line.indexOf(',', 2);
-  if (comma2 < 0) return false;
-
-  String s_lin = line.substring(2, comma2);
-  String s_ang = line.substring(comma2 + 1);
-
-  lin_out = s_lin.toFloat();
-  ang_out = s_ang.toFloat();
+  vx = line.substring(c1 + 1, c2).toFloat();
+  vy = line.substring(c2 + 1, c3).toFloat();
+  wz = line.substring(c3 + 1).toFloat();
   return true;
 }
 
@@ -115,48 +94,91 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // Setup PWM channels and attach to pins
-  ledcSetup(CH_M1_FWD,  PWM_FREQ, PWM_RES); ledcAttachPin(M1_FWD,  CH_M1_FWD);
-  ledcSetup(CH_M1_BKWD, PWM_FREQ, PWM_RES); ledcAttachPin(M1_BKWD, CH_M1_BKWD);
+  setupPinPwm(FL_FWD,  CH_FL_FWD);
+  setupPinPwm(FL_BKWD, CH_FL_BKWD);
 
-  ledcSetup(CH_M2_FWD,  PWM_FREQ, PWM_RES); ledcAttachPin(M2_FWD,  CH_M2_FWD);
-  ledcSetup(CH_M2_BKWD, PWM_FREQ, PWM_RES); ledcAttachPin(M2_BKWD, CH_M2_BKWD);
+  setupPinPwm(FR_FWD,  CH_FR_FWD);
+  setupPinPwm(FR_BKWD, CH_FR_BKWD);
 
-  ledcSetup(CH_M3_FWD,  PWM_FREQ, PWM_RES); ledcAttachPin(M3_FWD,  CH_M3_FWD);
-  ledcSetup(CH_M3_BKWD, PWM_FREQ, PWM_RES); ledcAttachPin(M3_BKWD, CH_M3_BKWD);
+  setupPinPwm(BL_FWD,  CH_BL_FWD);
+  setupPinPwm(BL_BKWD, CH_BL_BKWD);
 
-  ledcSetup(CH_M4_FWD,  PWM_FREQ, PWM_RES); ledcAttachPin(M4_FWD,  CH_M4_FWD);
-  ledcSetup(CH_M4_BKWD, PWM_FREQ, PWM_RES); ledcAttachPin(M4_BKWD, CH_M4_BKWD);
+  setupPinPwm(BR_FWD,  CH_BR_FWD);
+  setupPinPwm(BR_BKWD, CH_BR_BKWD);
 
   stopAll();
   last_cmd_ms = millis();
 
-  Serial.println("READY: send 'V,lin,ang' e.g. V,0.20,0.00");
+  Serial.println("ESP32 READY");
+  Serial.println("Protocol: V,vx,vy,wz");
 }
 
 void loop() {
   // Deadman safety
   if (millis() - last_cmd_ms > DEADMAN_MS) {
-    stopAll();
-  } else {
-    applyCmdVel(cmd_lin, cmd_ang);
+    cmd_vx = cmd_vy = cmd_wz = 0.0f;
   }
 
   // Read serial lines
-  if (Serial.available()) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
+  static String buf;
+  while (Serial.available()) {
+    char ch = (char)Serial.read();
+    if (ch == '\n') {
+      float vx, vy, wz;
+      if (parseCmdLine(buf, vx, vy, wz)) {
+        // clamp to expected ranges
+        if (vx >  MAX_VX) vx =  MAX_VX;
+        if (vx < -MAX_VX) vx = -MAX_VX;
+        if (vy >  MAX_VY) vy =  MAX_VY;
+        if (vy < -MAX_VY) vy = -MAX_VY;
+        if (wz >  MAX_WZ) wz =  MAX_WZ;
+        if (wz < -MAX_WZ) wz = -MAX_WZ;
 
-    float lin, ang;
-    if (parseVelLine(line, lin, ang)) {
-      cmd_lin = lin;
-      cmd_ang = ang;
-      last_cmd_ms = millis();
-      // Optional debug:
-      // Serial.printf("OK V lin=%.3f ang=%.3f\n", cmd_lin, cmd_ang);
-    } else {
-      // Optional debug:
-      // Serial.println("ERR bad line");
+        cmd_vx = vx;
+        cmd_vy = vy;
+        cmd_wz = wz;
+        last_cmd_ms = millis();
+
+        // Debug (comment out later)
+        Serial.print("RX ");
+        Serial.print(cmd_vx, 3); Serial.print(" ");
+        Serial.print(cmd_vy, 3); Serial.print(" ");
+        Serial.println(cmd_wz, 3);
+      }
+      buf = "";
+    } else if (ch != '\r') {
+      buf += ch;
+      if (buf.length() > 120) buf = ""; // safety
     }
   }
+
+  // ================== HOLONOMIC MIXING ==================
+  // Normalize to -1..1
+  float a = (MAX_VX > 0) ? (cmd_vx / MAX_VX) : 0.0f;
+  float b = (MAX_VY > 0) ? (cmd_vy / MAX_VY) : 0.0f;
+  float c = (MAX_WZ > 0) ? (cmd_wz / MAX_WZ) : 0.0f;
+
+  // Common mecanum/omni 4-wheel mix (works for most holonomic builds)
+  float fl = a - b - c;
+  float fr = a + b + c;
+  float bl = a + b - c;
+  float br = a - b + c;
+
+  // Normalize so max magnitude is 1.0
+  float m = max(max(fabs(fl), fabs(fr)), max(fabs(bl), fabs(br)));
+  if (m > 1.0f) {
+    fl /= m; fr /= m; bl /= m; br /= m;
+  }
+
+  int pwm_fl = (int)roundf(fl * 255.0f);
+  int pwm_fr = (int)roundf(fr * 255.0f);
+  int pwm_bl = (int)roundf(bl * 255.0f);
+  int pwm_br = (int)roundf(br * 255.0f);
+
+  setWheel(CH_FL_FWD, CH_FL_BKWD, pwm_fl);
+  setWheel(CH_FR_FWD, CH_FR_BKWD, pwm_fr);
+  setWheel(CH_BL_FWD, CH_BL_BKWD, pwm_bl);
+  setWheel(CH_BR_FWD, CH_BR_BKWD, pwm_br);
+
+  delay(10); // ~100 Hz motor update
 }
