@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_VL53L0X.h>
 
 // ================== YOUR CONFIRMED PINS ==================
 #define FL_FWD  18
@@ -37,6 +39,95 @@ static float cmd_vx = 0.0f;
 static float cmd_vy = 0.0f;
 static float cmd_wz = 0.0f;
 static uint32_t last_cmd_ms = 0;
+
+// ================== TOF (VL53L0X) ==================
+#define SDA_PIN 21
+#define SCL_PIN 22
+
+#define XSHUT_LEFT  25
+#define XSHUT_RIGHT 26
+
+static const uint8_t ADDR_LEFT  = 0x30;
+static const uint8_t ADDR_RIGHT = 0x31;
+
+static const uint32_t TOF_PERIOD_MS = 50; // 20 Hz
+static uint32_t last_tof_ms = 0;
+
+Adafruit_VL53L0X tofL;
+Adafruit_VL53L0X tofR;
+
+static void i2cScan(const char* label) {
+  Serial.println();
+  Serial.println(label);
+  uint8_t found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("  Found 0x");
+      if (addr < 16) Serial.print("0");
+      Serial.println(addr, HEX);
+      found++;
+    }
+  }
+  Serial.print("Total found: ");
+  Serial.println(found);
+}
+
+static void xshutAllLow() {
+  pinMode(XSHUT_LEFT, OUTPUT);
+  pinMode(XSHUT_RIGHT, OUTPUT);
+  digitalWrite(XSHUT_LEFT, LOW);
+  digitalWrite(XSHUT_RIGHT, LOW);
+  delay(50);
+}
+
+static bool initDualVL53L0X() {
+  xshutAllLow();
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(400000);
+
+  // Optional: if you want less spam, comment these scans out after confirming.
+  i2cScan("Scan with both XSHUT LOW (expect 0x70 only)");
+
+  // ---------- LEFT ----------
+  digitalWrite(XSHUT_LEFT, HIGH);
+  delay(80);
+
+  i2cScan("Scan after LEFT XSHUT HIGH (should include 0x29)");
+
+  if (!tofL.begin(0x29, false, &Wire)) {
+    Serial.println("LEFT VL53L0X begin() failed at 0x29");
+    return false;
+  }
+  tofL.setAddress(ADDR_LEFT);
+  delay(5);
+
+  Serial.print("LEFT OK @0x");
+  Serial.println(ADDR_LEFT, HEX);
+
+  i2cScan("Scan after LEFT address change (should include 0x30)");
+
+  // ---------- RIGHT ----------
+  digitalWrite(XSHUT_RIGHT, HIGH);
+  delay(80);
+
+  i2cScan("Scan after RIGHT XSHUT HIGH (should include 0x29 and 0x30)");
+
+  if (!tofR.begin(0x29, false, &Wire)) {
+    Serial.println("RIGHT VL53L0X begin() failed at 0x29");
+    return false;
+  }
+  tofR.setAddress(ADDR_RIGHT);
+  delay(5);
+
+  Serial.print("RIGHT OK @0x");
+  Serial.println(ADDR_RIGHT, HEX);
+
+  i2cScan("Final scan (expect 0x30, 0x31, 0x70)");
+
+  return true;
+}
 
 // ================== HELPERS ==================
 static inline int clampi(int x, int lo, int hi) {
@@ -78,7 +169,6 @@ static bool parseCmdLine(const String &line, float &vx, float &vy, float &wz) {
   if (line.length() < 2) return false;
   if (line[0] != 'V') return false;
 
-  // Expect commas
   int c1 = line.indexOf(',');
   int c2 = line.indexOf(',', c1 + 1);
   int c3 = line.indexOf(',', c2 + 1);
@@ -88,6 +178,22 @@ static bool parseCmdLine(const String &line, float &vx, float &vy, float &wz) {
   vy = line.substring(c2 + 1, c3).toFloat();
   wz = line.substring(c3 + 1).toFloat();
   return true;
+}
+
+static void publishTof() {
+  VL53L0X_RangingMeasurementData_t mL, mR;
+  tofL.rangingTest(&mL, false);
+  tofR.rangingTest(&mR, false);
+
+  // RangeStatus == 0 means valid range
+  uint16_t left_mm  = (mL.RangeStatus == 0) ? mL.RangeMilliMeter : 0;
+  uint16_t right_mm = (mR.RangeStatus == 0) ? mR.RangeMilliMeter : 0;
+
+  // CSV line that’s easy to parse on Jetson/ROS2
+  Serial.print("TOF,");
+  Serial.print(left_mm);
+  Serial.print(",");
+  Serial.println(right_mm);
 }
 
 void setup() {
@@ -111,6 +217,14 @@ void setup() {
 
   Serial.println("ESP32 READY");
   Serial.println("Protocol: V,vx,vy,wz");
+
+  // ---- ToF init ----
+  Serial.println("===== DUAL VL53L0X (XSHUT + ADDR) START =====");
+  bool tof_ok = initDualVL53L0X();
+  Serial.print("TOF INIT: ");
+  Serial.println(tof_ok ? "OK" : "FAIL");
+
+  last_tof_ms = millis();
 }
 
 void loop() {
@@ -139,7 +253,7 @@ void loop() {
         cmd_wz = wz;
         last_cmd_ms = millis();
 
-        // Debug (comment out later)
+        // Debug (comment out later if you want cleaner logs)
         Serial.print("RX ");
         Serial.print(cmd_vx, 3); Serial.print(" ");
         Serial.print(cmd_vy, 3); Serial.print(" ");
@@ -153,18 +267,15 @@ void loop() {
   }
 
   // ================== HOLONOMIC MIXING ==================
-  // Normalize to -1..1
   float a = (MAX_VX > 0) ? (cmd_vx / MAX_VX) : 0.0f;
   float b = (MAX_VY > 0) ? (cmd_vy / MAX_VY) : 0.0f;
   float c = (MAX_WZ > 0) ? (cmd_wz / MAX_WZ) : 0.0f;
 
-  // Common mecanum/omni 4-wheel mix (works for most holonomic builds)
   float fl = a - b - c;
   float fr = a + b + c;
   float bl = a + b - c;
   float br = a - b + c;
 
-  // Normalize so max magnitude is 1.0
   float m = max(max(fabs(fl), fabs(fr)), max(fabs(bl), fabs(br)));
   if (m > 1.0f) {
     fl /= m; fr /= m; bl /= m; br /= m;
@@ -179,6 +290,13 @@ void loop() {
   setWheel(CH_FR_FWD, CH_FR_BKWD, pwm_fr);
   setWheel(CH_BL_FWD, CH_BL_BKWD, pwm_bl);
   setWheel(CH_BR_FWD, CH_BR_BKWD, pwm_br);
+
+  // ================== TOF PUBLISH (non-blocking) ==================
+  uint32_t now = millis();
+  if (now - last_tof_ms >= TOF_PERIOD_MS) {
+    last_tof_ms = now;
+    publishTof();
+  }
 
   delay(10); // ~100 Hz motor update
 }

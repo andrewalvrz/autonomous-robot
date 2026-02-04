@@ -10,6 +10,10 @@
             "includePath": [
                 "/home/dex/autonomous-robot/include",
                 "/home/dex/autonomous-robot/src",
+                "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/Adafruit_VL53L0X/src",
+                "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/Adafruit BusIO",
+                "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src",
+                "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/newlib/platform_include",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include/esp_additions/freertos",
@@ -206,6 +210,8 @@
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/dio_qspi/include",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/cores/esp32",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/variants/esp32",
+                "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/Adafruit GFX Library",
+                "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/Adafruit SSD1306",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/ArduinoOTA/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/AsyncUDP/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/BLE/src",
@@ -228,7 +234,6 @@
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/RainMaker/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SD/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SD_MMC/src",
-                "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SPIFFS/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SimpleBLE/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/Ticker/src",
@@ -238,7 +243,6 @@
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
-                "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                 ""
             ],
             "browse": {
@@ -246,6 +250,10 @@
                 "path": [
                     "/home/dex/autonomous-robot/include",
                     "/home/dex/autonomous-robot/src",
+                    "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/Adafruit_VL53L0X/src",
+                    "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/Adafruit BusIO",
+                    "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src",
+                    "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/newlib/platform_include",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include/esp_additions/freertos",
@@ -442,6 +450,8 @@
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/dio_qspi/include",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/cores/esp32",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/variants/esp32",
+                    "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/Adafruit GFX Library",
+                    "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/Adafruit SSD1306",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/ArduinoOTA/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/AsyncUDP/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/BLE/src",
@@ -464,7 +474,6 @@
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/RainMaker/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SD/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SD_MMC/src",
-                    "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SPIFFS/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/SimpleBLE/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/Ticker/src",
@@ -474,7 +483,6 @@
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
-                    "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
                     ""
                 ]
             },
