@@ -5,14 +5,14 @@
 #include <driver/gpio.h>
 #include "soc/gpio_struct.h"
 
-#define M1_FWD  18
-#define M1_BKWD 19
-#define M2_FWD  16
-#define M2_BKWD 17
-#define M3_FWD  27
-#define M3_BKWD 26
-#define M4_FWD  13
-#define M4_BKWD 12
+#define M1_FWD  19   // was 18
+#define M1_BKWD 18   // was 19
+#define M2_FWD  17   // was 16
+#define M2_BKWD 16   // was 17
+#define M3_FWD  26   // was 27
+#define M3_BKWD 27   // was 26
+#define M4_FWD  12   // was 13
+#define M4_BKWD 13   // was 12
 
 // This is to mask all the gpio pins simultaneously using bitwise ORs
 // exp: GPIO pin 2 needs to be enabled (1), In a 32 bit system : 0010 -pin 2 enabled.
