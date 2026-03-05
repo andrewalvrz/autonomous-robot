@@ -24,20 +24,17 @@
 #include <DFRobot_BMI160.h>
 #include "fast_functions.h"
 
-// micro-ROS
 #include <micro_ros_arduino.h>
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 
-// ROS2 message types
 #include <sensor_msgs/msg/imu.h>
 #include <sensor_msgs/msg/range.h>
 #include <nav_msgs/msg/odometry.h>
 #include <geometry_msgs/msg/twist.h>
 
-// ── I2C / Hardware defines ─────────────────────────────────────
 #define MUX_ADDR      0x70
 #define AS5600_ADDR   0x36
 #define VL53L0X_ADDR  0x29
@@ -50,13 +47,11 @@
 #define CH_TOF_LEFT  4
 #define CH_TOF_RIGHT 5
 
-// ── Odometry constants — TUNE THESE ───────────────────────────
 #define WHEEL_RADIUS_M       0.05f
 #define WHEEL_BASE_LR_M      0.20f
 #define WHEEL_BASE_FB_M      0.20f
 #define AS5600_TICKS_PER_REV 4096.0f
 
-// ── Sensor objects ─────────────────────────────────────────────
 Adafruit_VL53L0X tofLeft;
 Adafruit_VL53L0X tofRight;
 DFRobot_BMI160   bmi160;
@@ -66,31 +61,24 @@ bool tofRightOk = false;
 bool imuOk      = false;
 bool encOk[4]   = {false, false, false, false};
 
-// ── Encoder state ──────────────────────────────────────────────
 uint16_t encPrevRaw[4] = {0, 0, 0, 0};
 int32_t  encTicks[4]   = {0, 0, 0, 0};
 bool     encInit[4]    = {false, false, false, false};
 
-// ── Odometry state ─────────────────────────────────────────────
 float    odom_x            = 0.0f;
 float    odom_y            = 0.0f;
 float    odom_theta        = 0.0f;
 int32_t  odom_prevTicks[4] = {0, 0, 0, 0};
 uint32_t odom_prevTimeUs   = 0;
 
-// ── cmd_vel watchdog ───────────────────────────────────────────
 #define CMD_VEL_TIMEOUT_MS 500
 uint32_t lastCmdVelMs  = 0;
 bool     motorsRunning = false;
+uint32_t lastPingMs    = 0;
 
-// ── Agent ping throttle ────────────────────────────────────────
-uint32_t lastPingMs = 0;
-
-// ── micro-ROS state machine ────────────────────────────────────
 enum RoverState { WAITING_AGENT, AGENT_CONNECTED, AGENT_DISCONNECTED };
 RoverState roverState = WAITING_AGENT;
 
-// ── micro-ROS handles ──────────────────────────────────────────
 rclc_support_t     support;
 rcl_allocator_t    allocator;
 rcl_node_t         node;
@@ -103,23 +91,18 @@ rcl_subscription_t cmd_vel_sub;
 rcl_timer_t        timer_main;
 rcl_timer_t        timer_tof;
 
-// ── ROS2 messages ──────────────────────────────────────────────
 sensor_msgs__msg__Imu     imu_msg;
 nav_msgs__msg__Odometry   odom_msg;
 sensor_msgs__msg__Range   tof_left_msg;
 sensor_msgs__msg__Range   tof_right_msg;
 geometry_msgs__msg__Twist cmd_vel_msg;
 
-// ── Frame ID strings ───────────────────────────────────────────
 char frame_odom[]      = "odom";
 char frame_base[]      = "base_link";
 char frame_imu[]       = "imu_link";
 char frame_tof_left[]  = "tof_left_link";
 char frame_tof_right[] = "tof_right_link";
 
-// ─────────────────────────────────────────────────────────────
-//  MUX helpers
-// ─────────────────────────────────────────────────────────────
 bool muxSelect(uint8_t ch) {
     Wire.beginTransmission(MUX_ADDR);
     Wire.write(1 << ch);
@@ -135,9 +118,6 @@ bool i2cPing(uint8_t addr) {
     return Wire.endTransmission() == 0;
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Encoder update
-// ─────────────────────────────────────────────────────────────
 void encodersUpdate() {
     for (uint8_t i = 0; i < 4; i++) {
         if (!encOk[i]) continue;
@@ -148,53 +128,37 @@ void encodersUpdate() {
         Wire.requestFrom(AS5600_ADDR, 2);
         if (Wire.available() < 2) continue;
         uint16_t raw = (((uint16_t)Wire.read() << 8) | Wire.read()) & 0x0FFF;
-        if (!encInit[i]) {
-            encPrevRaw[i] = raw;
-            encInit[i]    = true;
-            continue;
-        }
+        if (!encInit[i]) { encPrevRaw[i] = raw; encInit[i] = true; continue; }
         int16_t delta = (int16_t)raw - (int16_t)encPrevRaw[i];
         if (delta >  2048) delta -= 4096;
         if (delta < -2048) delta += 4096;
-        encTicks[i]   += delta;
-        encPrevRaw[i]  = raw;
+        encTicks[i]  += delta;
+        encPrevRaw[i] = raw;
     }
     muxDeselect();
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Timestamp helper
-// ─────────────────────────────────────────────────────────────
 void stampNow(builtin_interfaces__msg__Time& t) {
     int64_t ns = (int64_t)micros() * 1000LL;
-    t.sec      = (int32_t)(ns / 1000000000LL);
-    t.nanosec  = (uint32_t)(ns % 1000000000LL);
+    t.sec     = (int32_t)(ns / 1000000000LL);
+    t.nanosec = (uint32_t)(ns % 1000000000LL);
 }
 
-// ─────────────────────────────────────────────────────────────
-//  IMU read
-// ─────────────────────────────────────────────────────────────
 void imuRead() {
     if (!imuOk) return;
     int16_t buf[6];
     bmi160.getAccelGyroData(buf);
-    // IMU mounted upside down — flip Z
     imu_msg.angular_velocity.x    =  (buf[0] / 65.6f)   * (3.14159265f / 180.0f);
     imu_msg.angular_velocity.y    =  (buf[1] / 65.6f)   * (3.14159265f / 180.0f);
     imu_msg.angular_velocity.z    = -(buf[2] / 65.6f)   * (3.14159265f / 180.0f);
     imu_msg.linear_acceleration.x =  (buf[3] / 8192.0f) * 9.80665f;
     imu_msg.linear_acceleration.y =  (buf[4] / 8192.0f) * 9.80665f;
     imu_msg.linear_acceleration.z = -(buf[5] / 8192.0f) * 9.80665f;
-    imu_msg.orientation.x = 0;
-    imu_msg.orientation.y = 0;
-    imu_msg.orientation.z = 0;
-    imu_msg.orientation.w = 1;
+    imu_msg.orientation.x = 0; imu_msg.orientation.y = 0;
+    imu_msg.orientation.z = 0; imu_msg.orientation.w = 1;
     stampNow(imu_msg.header.stamp);
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Odometry compute
-// ─────────────────────────────────────────────────────────────
 void odomCompute() {
     uint32_t now = micros();
     float dt = (now - odom_prevTimeUs) / 1e6f;
@@ -204,26 +168,22 @@ void odomCompute() {
         return;
     }
     odom_prevTimeUs = now;
-
     float d[4];
     for (uint8_t i = 0; i < 4; i++) {
         d[i] = ((encTicks[i] - odom_prevTicks[i]) / AS5600_TICKS_PER_REV)
                * 2.0f * 3.14159265f * WHEEL_RADIUS_M;
         odom_prevTicks[i] = encTicks[i];
     }
-
     float Lxy    = (WHEEL_BASE_LR_M + WHEEL_BASE_FB_M) / 2.0f;
     float dx     = ( d[0] + d[1] + d[2] + d[3]) / 4.0f;
     float dy     = (-d[0] + d[1] + d[2] - d[3]) / 4.0f;
     float dtheta = (-d[0] + d[1] - d[2] + d[3]) / (4.0f * Lxy);
-
-    float mid   = odom_theta + dtheta / 2.0f;
-    odom_x     += dx * cosf(mid) - dy * sinf(mid);
-    odom_y     += dx * sinf(mid) + dy * cosf(mid);
-    odom_theta += dtheta;
+    float mid    = odom_theta + dtheta / 2.0f;
+    odom_x      += dx * cosf(mid) - dy * sinf(mid);
+    odom_y      += dx * sinf(mid) + dy * cosf(mid);
+    odom_theta  += dtheta;
     while (odom_theta >  3.14159265f) odom_theta -= 2.0f * 3.14159265f;
     while (odom_theta < -3.14159265f) odom_theta += 2.0f * 3.14159265f;
-
     odom_msg.pose.pose.position.x    = odom_x;
     odom_msg.pose.pose.position.y    = odom_y;
     odom_msg.pose.pose.position.z    = 0.0;
@@ -237,16 +197,12 @@ void odomCompute() {
     stampNow(odom_msg.header.stamp);
 }
 
-// ─────────────────────────────────────────────────────────────
-//  ToF read — non-blocking continuous mode
-// ─────────────────────────────────────────────────────────────
 void tofRead() {
     if (tofLeftOk) {
         muxSelect(CH_TOF_LEFT);
         if (tofLeft.isRangeComplete()) {
             uint16_t mm = tofLeft.readRangeResult();
-            tof_left_msg.range = (mm < 8190)
-                ? constrain(mm / 1000.0f, 0.03f, 2.0f) : 2.0f;
+            tof_left_msg.range = (mm < 8190) ? constrain(mm / 1000.0f, 0.03f, 2.0f) : 2.0f;
             stampNow(tof_left_msg.header.stamp);
         }
     }
@@ -254,33 +210,26 @@ void tofRead() {
         muxSelect(CH_TOF_RIGHT);
         if (tofRight.isRangeComplete()) {
             uint16_t mm = tofRight.readRangeResult();
-            tof_right_msg.range = (mm < 8190)
-                ? constrain(mm / 1000.0f, 0.03f, 2.0f) : 2.0f;
+            tof_right_msg.range = (mm < 8190) ? constrain(mm / 1000.0f, 0.03f, 2.0f) : 2.0f;
             stampNow(tof_right_msg.header.stamp);
         }
     }
     muxDeselect();
 }
 
-// ─────────────────────────────────────────────────────────────
-//  cmd_vel callback — mecanum kinematics
-// ─────────────────────────────────────────────────────────────
 void cmdVelCallback(const void* msg_in) {
-    const geometry_msgs__msg__Twist* msg =
-        (const geometry_msgs__msg__Twist*)msg_in;
+    const geometry_msgs__msg__Twist* msg = (const geometry_msgs__msg__Twist*)msg_in;
     lastCmdVelMs  = millis();
     motorsRunning = true;
-
-    Serial.println("CMD_VEL RECEIVED");
 
     float vx = constrain(msg->linear.x  / 0.5f, -1.0f, 1.0f);
     float vy = constrain(msg->linear.y  / 0.5f, -1.0f, 1.0f);
     float wz = constrain(msg->angular.z / 2.0f, -1.0f, 1.0f);
 
-    float m1 = vx - vy - wz;
-    float m2 = vx + vy + wz;
-    float m3 = vx + vy - wz;
-    float m4 = vx - vy + wz;
+    float m1 = vx - vy - wz;  // FL
+    float m2 = vx + vy + wz;  // FR
+    float m3 = vx + vy - wz;  // BL
+    float m4 = vx - vy + wz;  // BR
 
     float mx = max(max(fabsf(m1), fabsf(m2)), max(fabsf(m3), fabsf(m4)));
     if (mx > 1.0f) { m1/=mx; m2/=mx; m3/=mx; m4/=mx; }
@@ -293,9 +242,6 @@ void cmdVelCallback(const void* msg_in) {
     );
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Main timer — IMU + Odometry + Encoders
-// ─────────────────────────────────────────────────────────────
 void timerMainCallback(rcl_timer_t* timer, int64_t) {
     if (!timer) return;
     encodersUpdate();
@@ -305,9 +251,6 @@ void timerMainCallback(rcl_timer_t* timer, int64_t) {
     rcl_publish(&odom_pub, &odom_msg, NULL);
 }
 
-// ─────────────────────────────────────────────────────────────
-//  ToF timer
-// ─────────────────────────────────────────────────────────────
 void timerTofCallback(rcl_timer_t* timer, int64_t) {
     if (!timer) return;
     tofRead();
@@ -315,40 +258,27 @@ void timerTofCallback(rcl_timer_t* timer, int64_t) {
     rcl_publish(&tof_right_pub, &tof_right_msg, NULL);
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Create all micro-ROS entities
-// ─────────────────────────────────────────────────────────────
 bool createEntities() {
     allocator = rcl_get_default_allocator();
     if (rclc_support_init(&support, 0, NULL, &allocator) != RCL_RET_OK) return false;
     if (rclc_node_init_default(&node, "rover_node", "", &support) != RCL_RET_OK) return false;
 
-    rclc_publisher_init_default(&imu_pub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu), "/imu/data");
-    rclc_publisher_init_default(&odom_pub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "/odom");
-    rclc_publisher_init_default(&tof_left_pub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range), "/tof/left");
-    rclc_publisher_init_default(&tof_right_pub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Range), "/tof/right");
-    rclc_subscription_init_default(&cmd_vel_sub, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "/cmd_vel");
+    rclc_publisher_init_default(&imu_pub,       &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs,  msg, Imu),      "/imu/data");
+    rclc_publisher_init_default(&odom_pub,      &node, ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs,     msg, Odometry), "/odom");
+    rclc_publisher_init_default(&tof_left_pub,  &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs,  msg, Range),    "/tof/left");
+    rclc_publisher_init_default(&tof_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs,  msg, Range),    "/tof/right");
+    rclc_subscription_init_default(&cmd_vel_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),  "/cmd_vel");
 
-    // 100ms = 10Hz — well within 115200 bandwidth
     rclc_timer_init_default2(&timer_main, &support, 100000000ULL, timerMainCallback, true);
     rclc_timer_init_default2(&timer_tof,  &support, 200000000ULL, timerTofCallback,  true);
 
     rclc_executor_init(&executor, &support.context, 3, &allocator);
     rclc_executor_add_timer(&executor, &timer_main);
     rclc_executor_add_timer(&executor, &timer_tof);
-    rclc_executor_add_subscription(&executor, &cmd_vel_sub,
-        &cmd_vel_msg, &cmdVelCallback, ON_NEW_DATA);
+    rclc_executor_add_subscription(&executor, &cmd_vel_sub, &cmd_vel_msg, &cmdVelCallback, ON_NEW_DATA);
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Destroy micro-ROS entities
-// ─────────────────────────────────────────────────────────────
 void destroyEntities() {
     rmw_context_t* rmw_context = rcl_context_get_rmw_context(&support.context);
     (void)rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
@@ -364,9 +294,6 @@ void destroyEntities() {
     rclc_support_fini(&support);
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Hardware init
-// ─────────────────────────────────────────────────────────────
 void initHardware() {
     Wire.begin(21, 22);
     Wire.setClock(1000000);
@@ -433,21 +360,47 @@ void initHardware() {
     odom_msg.twist.covariance[35] = 0.05;
 }
 
-// ─────────────────────────────────────────────────────────────
-//  SETUP
-// ─────────────────────────────────────────────────────────────
-void setup() {
-    Serial.begin(115200);
-    set_microros_transports();
-    initHardware();
+void motorTest() {
+    Serial.println("=== MOTOR TEST ===");
+    Serial.println("Watch which physical wheel spins each time.");
+    delay(2000);
+
+    Serial.println("M1 FWD (expected: Front-Left, forward)");
+    ledcWrite(CH_M1_FWD, 150); delay(1500); motorsOFF(); delay(500);
+
+    Serial.println("M1 BKWD (expected: Front-Left, backward)");
+    ledcWrite(CH_M1_BKWD, 150); delay(1500); motorsOFF(); delay(500);
+
+    Serial.println("M2 FWD (expected: Front-Right, forward)");
+    ledcWrite(CH_M2_FWD, 150); delay(1500); motorsOFF(); delay(500);
+
+    Serial.println("M2 BKWD (expected: Front-Right, backward)");
+    ledcWrite(CH_M2_BKWD, 150); delay(1500); motorsOFF(); delay(500);
+
+    Serial.println("M3 FWD (expected: Back-Left, forward)");
+    ledcWrite(CH_M3_FWD, 150); delay(1500); motorsOFF(); delay(500);
+
+    Serial.println("M3 BKWD (expected: Back-Left, backward)");
+    ledcWrite(CH_M3_BKWD, 150); delay(1500); motorsOFF(); delay(500);
+
+    Serial.println("M4 FWD (expected: Back-Right, forward)");
+    ledcWrite(CH_M4_FWD, 150); delay(1500); motorsOFF(); delay(500);
+
+    Serial.println("M4 BKWD (expected: Back-Right, backward)");
+    ledcWrite(CH_M4_BKWD, 150); delay(1500); motorsOFF(); delay(500);
+
+    Serial.println("=== TEST COMPLETE ===");
+    delay(1000);
 }
 
-// ─────────────────────────────────────────────────────────────
-//  LOOP
-// ─────────────────────────────────────────────────────────────
+void setup() {
+    Serial.begin(115200);
+    initHardware();
+    set_microros_transports();
+}
+
 void loop() {
     switch (roverState) {
-
         case WAITING_AGENT:
             if (rmw_uros_ping_agent(500, 1) == RCL_RET_OK) {
                 if (createEntities()) {
@@ -459,8 +412,7 @@ void loop() {
 
         case AGENT_CONNECTED:
             rclc_executor_spin_some(&executor, 1000000ULL);
-            if (motorsRunning &&
-               (millis() - lastCmdVelMs > CMD_VEL_TIMEOUT_MS)) {
+            if (motorsRunning && (millis() - lastCmdVelMs > CMD_VEL_TIMEOUT_MS)) {
                 motorsOFF();
                 motorsRunning = false;
             }
