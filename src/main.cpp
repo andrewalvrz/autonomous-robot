@@ -360,38 +360,6 @@ void initHardware() {
     odom_msg.twist.covariance[35] = 0.05;
 }
 
-void motorTest() {
-    Serial.println("=== MOTOR TEST ===");
-    Serial.println("Watch which physical wheel spins each time.");
-    delay(2000);
-
-    Serial.println("M1 FWD (expected: Front-Left, forward)");
-    ledcWrite(CH_M1_FWD, 150); delay(1500); motorsOFF(); delay(500);
-
-    Serial.println("M1 BKWD (expected: Front-Left, backward)");
-    ledcWrite(CH_M1_BKWD, 150); delay(1500); motorsOFF(); delay(500);
-
-    Serial.println("M2 FWD (expected: Front-Right, forward)");
-    ledcWrite(CH_M2_FWD, 150); delay(1500); motorsOFF(); delay(500);
-
-    Serial.println("M2 BKWD (expected: Front-Right, backward)");
-    ledcWrite(CH_M2_BKWD, 150); delay(1500); motorsOFF(); delay(500);
-
-    Serial.println("M3 FWD (expected: Back-Left, forward)");
-    ledcWrite(CH_M3_FWD, 150); delay(1500); motorsOFF(); delay(500);
-
-    Serial.println("M3 BKWD (expected: Back-Left, backward)");
-    ledcWrite(CH_M3_BKWD, 150); delay(1500); motorsOFF(); delay(500);
-
-    Serial.println("M4 FWD (expected: Back-Right, forward)");
-    ledcWrite(CH_M4_FWD, 150); delay(1500); motorsOFF(); delay(500);
-
-    Serial.println("M4 BKWD (expected: Back-Right, backward)");
-    ledcWrite(CH_M4_BKWD, 150); delay(1500); motorsOFF(); delay(500);
-
-    Serial.println("=== TEST COMPLETE ===");
-    delay(1000);
-}
 
 void setup() {
     Serial.begin(115200);
