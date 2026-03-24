@@ -6,12 +6,12 @@
 #include "soc/gpio_struct.h"
 
 // FWD/BKWD swapped to match physical motor direction
-#define M1_FWD  19
-#define M1_BKWD 18
+#define M1_FWD  18
+#define M1_BKWD 19
 #define M2_FWD  16
 #define M2_BKWD 17
-#define M3_FWD  26
-#define M3_BKWD 27
+#define M3_FWD  27
+#define M3_BKWD 26
 #define M4_FWD  13
 #define M4_BKWD 12
 
