@@ -95,14 +95,14 @@ constexpr uint32_t COLLECTION_MASK = (1UL << (COLLECTION - 32));  // GPIO32+ →
 // ── LEDC PWM (channels 0–7) ───────────────────────────────────
 constexpr uint32_t PWM_FREQ_HZ  = 20000;
 constexpr uint8_t  PWM_RES_BITS = 8;
-constexpr uint8_t  CH_M1_FWD   = 0;
-constexpr uint8_t  CH_M1_BKWD  = 1;
-constexpr uint8_t  CH_M2_FWD   = 2;
-constexpr uint8_t  CH_M2_BKWD  = 3;
-constexpr uint8_t  CH_M3_FWD   = 4;
-constexpr uint8_t  CH_M3_BKWD  = 5;
-constexpr uint8_t  CH_M4_FWD   = 6;
-constexpr uint8_t  CH_M4_BKWD  = 7;
+constexpr uint8_t  CH_M1_FWD   = 2;  // 0-1 reserved for ESP32Servo
+constexpr uint8_t  CH_M1_BKWD  = 3;
+constexpr uint8_t  CH_M2_FWD   = 4;
+constexpr uint8_t  CH_M2_BKWD  = 5;
+constexpr uint8_t  CH_M3_FWD   = 6;
+constexpr uint8_t  CH_M3_BKWD  = 7;
+constexpr uint8_t  CH_M4_FWD   = 8;
+constexpr uint8_t  CH_M4_BKWD  = 9;
 
 static uint8_t motorSpeed = 255;
 
@@ -193,8 +193,8 @@ inline void collectionInit() {
 inline void servosInit() {
     doorServo.setPeriodHertz(50);
     armServo.setPeriodHertz(50);
-    doorServo.attach(SERVO_DOOR_PIN, SERVO_MIN_US, SERVO_MAX_US);
-    armServo.attach(SERVO_ARM_PIN,   SERVO_MIN_US, SERVO_MAX_US);
+    doorServo.attach(SERVO_DOOR_PIN, SERVO_MIN_US, SERVO_MAX_US);  // takes ch 0
+    armServo.attach(SERVO_ARM_PIN,   SERVO_MIN_US, SERVO_MAX_US);  // takes ch 1
     doorServo.write(SERVO_DOOR_CLOSED_ANGLE);
     armServo.write(SERVO_ARM_HOME_ANGLE);
     delay(250);

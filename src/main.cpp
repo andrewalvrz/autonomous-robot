@@ -390,9 +390,9 @@ void initHardware() {
     Wire.setClock(1000000);
     delay(100);
 
-    motorsInit();
+    servosInit();       // must be first — ESP32Servo auto-allocates ch 0-1
+    motorsInit();       // uses ch 2-9
     motorsOFF();
-    servosInit();       // NEW
     collectionInit();   // NEW
 
     analogReadResolution(12); // NEW — 12-bit ADC for photosensor (0–4095)
