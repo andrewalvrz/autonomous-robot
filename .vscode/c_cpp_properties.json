@@ -10,6 +10,7 @@
             "includePath": [
                 "/home/dex/autonomous-robot/include",
                 "/home/dex/autonomous-robot/src",
+                "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/ESP32Servo/src",
                 "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/DFRobot_BMI160",
                 "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/Adafruit_VL53L0X/src",
                 "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",
@@ -252,6 +253,7 @@
                 "path": [
                     "/home/dex/autonomous-robot/include",
                     "/home/dex/autonomous-robot/src",
+                    "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/ESP32Servo/src",
                     "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/DFRobot_BMI160",
                     "/home/dex/autonomous-robot/.pio/libdeps/esp32dev/Adafruit_VL53L0X/src",
                     "/home/dex/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src",

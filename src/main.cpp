@@ -8,13 +8,21 @@
  *    /odom            nav_msgs/Odometry
  *    /tof/left        sensor_msgs/Range
  *    /tof/right       sensor_msgs/Range
+ *    /photo           sensor_msgs/Illuminance
  *
  *  Subscribes:
  *    /cmd_vel         geometry_msgs/Twist
+ *    /servo/door      std_msgs/Int32   (angle 0–180)
+ *    /servo/arm       std_msgs/Int32   (angle 0–180)
+ *    /collection      std_msgs/Bool    (true = ON, false = OFF)
  *
  *  Start agent on laptop:
  *    docker run -it --rm -v /dev:/dev --privileged --net=host \
  *      microros/micro-ros-agent:humble serial --dev /dev/ttyUSB0 -b 115200
+ *
+ *  Pin summary:
+ *    SDA=21  SCL=22  (I2C — encoders, ToF, IMU, MUX)
+ *    servo_door=23   servo_arm=14   photo=25   collection=32
  * ============================================================
  */
 
@@ -32,9 +40,13 @@
 
 #include <sensor_msgs/msg/imu.h>
 #include <sensor_msgs/msg/range.h>
+#include <sensor_msgs/msg/illuminance.h>
 #include <nav_msgs/msg/odometry.h>
 #include <geometry_msgs/msg/twist.h>
+#include <std_msgs/msg/int32.h>
+#include <std_msgs/msg/bool.h>
 
+// ── I2C addresses & MUX channels ─────────────────────────────
 #define MUX_ADDR      0x70
 #define AS5600_ADDR   0x36
 #define VL53L0X_ADDR  0x29
@@ -47,11 +59,13 @@
 #define CH_TOF_LEFT  4
 #define CH_TOF_RIGHT 5
 
+// ── Odometry constants ────────────────────────────────────────
 #define WHEEL_RADIUS_M       0.05f
 #define WHEEL_BASE_LR_M      0.20f
 #define WHEEL_BASE_FB_M      0.20f
 #define AS5600_TICKS_PER_REV 4096.0f
 
+// ── Hardware objects ──────────────────────────────────────────
 Adafruit_VL53L0X tofLeft;
 Adafruit_VL53L0X tofRight;
 DFRobot_BMI160   bmi160;
@@ -61,48 +75,69 @@ bool tofRightOk = false;
 bool imuOk      = false;
 bool encOk[4]   = {false, false, false, false};
 
+// ── Encoder state ─────────────────────────────────────────────
 uint16_t encPrevRaw[4] = {0, 0, 0, 0};
 int32_t  encTicks[4]   = {0, 0, 0, 0};
 bool     encInit[4]    = {false, false, false, false};
 
+// ── Odometry state ────────────────────────────────────────────
 float    odom_x            = 0.0f;
 float    odom_y            = 0.0f;
 float    odom_theta        = 0.0f;
 int32_t  odom_prevTicks[4] = {0, 0, 0, 0};
 uint32_t odom_prevTimeUs   = 0;
 
+// ── cmd_vel watchdog ──────────────────────────────────────────
 #define CMD_VEL_TIMEOUT_MS 500
 uint32_t lastCmdVelMs  = 0;
 bool     motorsRunning = false;
 uint32_t lastPingMs    = 0;
 
+// ── micro-ROS state machine ───────────────────────────────────
 enum RoverState { WAITING_AGENT, AGENT_CONNECTED, AGENT_DISCONNECTED };
 RoverState roverState = WAITING_AGENT;
 
+// ── micro-ROS handles ─────────────────────────────────────────
 rclc_support_t     support;
 rcl_allocator_t    allocator;
 rcl_node_t         node;
 rclc_executor_t    executor;
+
 rcl_publisher_t    imu_pub;
 rcl_publisher_t    odom_pub;
 rcl_publisher_t    tof_left_pub;
 rcl_publisher_t    tof_right_pub;
+rcl_publisher_t    photo_pub;       // NEW
+
 rcl_subscription_t cmd_vel_sub;
+rcl_subscription_t servo_door_sub;  // NEW
+rcl_subscription_t servo_arm_sub;   // NEW
+rcl_subscription_t collection_sub;  // NEW
+
 rcl_timer_t        timer_main;
 rcl_timer_t        timer_tof;
+rcl_timer_t        timer_photo;     // NEW
 
-sensor_msgs__msg__Imu     imu_msg;
-nav_msgs__msg__Odometry   odom_msg;
-sensor_msgs__msg__Range   tof_left_msg;
-sensor_msgs__msg__Range   tof_right_msg;
-geometry_msgs__msg__Twist cmd_vel_msg;
+// ── Messages ──────────────────────────────────────────────────
+sensor_msgs__msg__Imu         imu_msg;
+nav_msgs__msg__Odometry       odom_msg;
+sensor_msgs__msg__Range       tof_left_msg;
+sensor_msgs__msg__Range       tof_right_msg;
+sensor_msgs__msg__Illuminance photo_msg;      // NEW
+geometry_msgs__msg__Twist     cmd_vel_msg;
+std_msgs__msg__Int32          servo_door_msg; // NEW
+std_msgs__msg__Int32          servo_arm_msg;  // NEW
+std_msgs__msg__Bool           collection_msg; // NEW
 
+// ── Frame IDs ─────────────────────────────────────────────────
 char frame_odom[]      = "odom";
 char frame_base[]      = "base_link";
 char frame_imu[]       = "imu_link";
 char frame_tof_left[]  = "tof_left_link";
 char frame_tof_right[] = "tof_right_link";
+char frame_photo[]     = "base_link";
 
+// ── I2C helpers ───────────────────────────────────────────────
 bool muxSelect(uint8_t ch) {
     Wire.beginTransmission(MUX_ADDR);
     Wire.write(1 << ch);
@@ -118,6 +153,7 @@ bool i2cPing(uint8_t addr) {
     return Wire.endTransmission() == 0;
 }
 
+// ── Encoder update ────────────────────────────────────────────
 void encodersUpdate() {
     for (uint8_t i = 0; i < 4; i++) {
         if (!encOk[i]) continue;
@@ -144,6 +180,7 @@ void stampNow(builtin_interfaces__msg__Time& t) {
     t.nanosec = (uint32_t)(ns % 1000000000LL);
 }
 
+// ── IMU read ──────────────────────────────────────────────────
 void imuRead() {
     if (!imuOk) return;
     int16_t buf[6];
@@ -159,6 +196,7 @@ void imuRead() {
     stampNow(imu_msg.header.stamp);
 }
 
+// ── Odometry compute ──────────────────────────────────────────
 void odomCompute() {
     uint32_t now = micros();
     float dt = (now - odom_prevTimeUs) / 1e6f;
@@ -197,6 +235,7 @@ void odomCompute() {
     stampNow(odom_msg.header.stamp);
 }
 
+// ── ToF read ──────────────────────────────────────────────────
 void tofRead() {
     if (tofLeftOk) {
         muxSelect(CH_TOF_LEFT);
@@ -217,6 +256,7 @@ void tofRead() {
     muxDeselect();
 }
 
+// ── Subscription callbacks ────────────────────────────────────
 void cmdVelCallback(const void* msg_in) {
     const geometry_msgs__msg__Twist* msg = (const geometry_msgs__msg__Twist*)msg_in;
     lastCmdVelMs  = millis();
@@ -242,6 +282,28 @@ void cmdVelCallback(const void* msg_in) {
     );
 }
 
+// NEW: /servo/door — accepts an angle (0–180)
+void servoDoorCallback(const void* msg_in) {
+    const std_msgs__msg__Int32* msg = (const std_msgs__msg__Int32*)msg_in;
+    int angle = constrain(msg->data, 0, 180);
+    doorServo.write(angle);
+}
+
+// NEW: /servo/arm — accepts an angle (0–180)
+void servoArmCallback(const void* msg_in) {
+    const std_msgs__msg__Int32* msg = (const std_msgs__msg__Int32*)msg_in;
+    int angle = constrain(msg->data, 0, 180);
+    armServo.write(angle);
+}
+
+// NEW: /collection — true = ON, false = OFF
+void collectionCallback(const void* msg_in) {
+    const std_msgs__msg__Bool* msg = (const std_msgs__msg__Bool*)msg_in;
+    if (msg->data) GPIO.out1_w1ts.val = COLLECTION_MASK;  // GPIO32+ high bank
+    else           GPIO.out1_w1tc.val = COLLECTION_MASK;
+}
+
+// ── Timer callbacks ───────────────────────────────────────────
 void timerMainCallback(rcl_timer_t* timer, int64_t) {
     if (!timer) return;
     encodersUpdate();
@@ -258,24 +320,47 @@ void timerTofCallback(rcl_timer_t* timer, int64_t) {
     rcl_publish(&tof_right_pub, &tof_right_msg, NULL);
 }
 
+// NEW: publishes raw ADC reading as lux field (scale as needed)
+void timerPhotoCallback(rcl_timer_t* timer, int64_t) {
+    if (!timer) return;
+    photo_msg.illuminance = (double)photoRead();
+    stampNow(photo_msg.header.stamp);
+    rcl_publish(&photo_pub, &photo_msg, NULL);
+}
+
+// ── micro-ROS entity create/destroy ──────────────────────────
 bool createEntities() {
     allocator = rcl_get_default_allocator();
     if (rclc_support_init(&support, 0, NULL, &allocator) != RCL_RET_OK) return false;
     if (rclc_node_init_default(&node, "rover_node", "", &support) != RCL_RET_OK) return false;
 
-    rclc_publisher_init_default(&imu_pub,       &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs,  msg, Imu),      "/imu/data");
-    rclc_publisher_init_default(&odom_pub,      &node, ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs,     msg, Odometry), "/odom");
-    rclc_publisher_init_default(&tof_left_pub,  &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs,  msg, Range),    "/tof/left");
-    rclc_publisher_init_default(&tof_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs,  msg, Range),    "/tof/right");
-    rclc_subscription_init_default(&cmd_vel_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),  "/cmd_vel");
+    // Publishers
+    rclc_publisher_init_default(&imu_pub,       &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs,  msg, Imu),         "/imu/data");
+    rclc_publisher_init_default(&odom_pub,      &node, ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs,     msg, Odometry),    "/odom");
+    rclc_publisher_init_default(&tof_left_pub,  &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs,  msg, Range),       "/tof/left");
+    rclc_publisher_init_default(&tof_right_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs,  msg, Range),       "/tof/right");
+    rclc_publisher_init_default(&photo_pub,     &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs,  msg, Illuminance), "/photo");      // NEW
 
-    rclc_timer_init_default2(&timer_main, &support, 100000000ULL, timerMainCallback, true);
-    rclc_timer_init_default2(&timer_tof,  &support, 200000000ULL, timerTofCallback,  true);
+    // Subscribers
+    rclc_subscription_init_default(&cmd_vel_sub,    &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "/cmd_vel");
+    rclc_subscription_init_default(&servo_door_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, Int32), "/servo/door"); // NEW
+    rclc_subscription_init_default(&servo_arm_sub,  &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, Int32), "/servo/arm");  // NEW
+    rclc_subscription_init_default(&collection_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, Bool),  "/collection"); // NEW
 
-    rclc_executor_init(&executor, &support.context, 3, &allocator);
+    // Timers
+    rclc_timer_init_default2(&timer_main,  &support, 100000000ULL, timerMainCallback,  true);  // 100 ms
+    rclc_timer_init_default2(&timer_tof,   &support, 200000000ULL, timerTofCallback,   true);  // 200 ms
+    rclc_timer_init_default2(&timer_photo, &support, 100000000ULL, timerPhotoCallback, true);  // 100 ms NEW
+
+    // Executor — 3 timers + 4 subscribers = 7 handles
+    rclc_executor_init(&executor, &support.context, 7, &allocator);
     rclc_executor_add_timer(&executor, &timer_main);
     rclc_executor_add_timer(&executor, &timer_tof);
-    rclc_executor_add_subscription(&executor, &cmd_vel_sub, &cmd_vel_msg, &cmdVelCallback, ON_NEW_DATA);
+    rclc_executor_add_timer(&executor, &timer_photo);                                                           // NEW
+    rclc_executor_add_subscription(&executor, &cmd_vel_sub,    &cmd_vel_msg,    &cmdVelCallback,    ON_NEW_DATA);
+    rclc_executor_add_subscription(&executor, &servo_door_sub, &servo_door_msg, &servoDoorCallback, ON_NEW_DATA); // NEW
+    rclc_executor_add_subscription(&executor, &servo_arm_sub,  &servo_arm_msg,  &servoArmCallback,  ON_NEW_DATA); // NEW
+    rclc_executor_add_subscription(&executor, &collection_sub, &collection_msg, &collectionCallback,ON_NEW_DATA); // NEW
     return true;
 }
 
@@ -286,14 +371,20 @@ void destroyEntities() {
     rcl_publisher_fini(&odom_pub,      &node);
     rcl_publisher_fini(&tof_left_pub,  &node);
     rcl_publisher_fini(&tof_right_pub, &node);
-    rcl_subscription_fini(&cmd_vel_sub, &node);
+    rcl_publisher_fini(&photo_pub,     &node);   // NEW
+    rcl_subscription_fini(&cmd_vel_sub,    &node);
+    rcl_subscription_fini(&servo_door_sub, &node); // NEW
+    rcl_subscription_fini(&servo_arm_sub,  &node); // NEW
+    rcl_subscription_fini(&collection_sub, &node); // NEW
     rcl_timer_fini(&timer_main);
     rcl_timer_fini(&timer_tof);
+    rcl_timer_fini(&timer_photo); // NEW
     rclc_executor_fini(&executor);
     rcl_node_fini(&node);
     rclc_support_fini(&support);
 }
 
+// ── Hardware init ─────────────────────────────────────────────
 void initHardware() {
     Wire.begin(21, 22);
     Wire.setClock(1000000);
@@ -301,6 +392,10 @@ void initHardware() {
 
     motorsInit();
     motorsOFF();
+    servosInit();       // NEW
+    collectionInit();   // NEW
+
+    analogReadResolution(12); // NEW — 12-bit ADC for photosensor (0–4095)
 
     for (uint8_t i = 0; i < 4; i++) {
         muxSelect(i); delay(2);
@@ -324,6 +419,7 @@ void initHardware() {
         imuOk = (bmi160.I2cInit(BMI160_ADDR) == BMI160_OK);
     }
 
+    // ToF message init
     tof_left_msg.radiation_type  = sensor_msgs__msg__Range__INFRARED;
     tof_left_msg.field_of_view   = 0.44f;
     tof_left_msg.min_range       = 0.03f;
@@ -333,6 +429,7 @@ void initHardware() {
     tof_right_msg.min_range      = 0.03f;
     tof_right_msg.max_range      = 2.0f;
 
+    // Frame IDs
     imu_msg.header.frame_id.data       = frame_imu;
     imu_msg.header.frame_id.size       = strlen(frame_imu);
     odom_msg.header.frame_id.data      = frame_odom;
@@ -343,7 +440,10 @@ void initHardware() {
     tof_left_msg.header.frame_id.size  = strlen(frame_tof_left);
     tof_right_msg.header.frame_id.data = frame_tof_right;
     tof_right_msg.header.frame_id.size = strlen(frame_tof_right);
+    photo_msg.header.frame_id.data     = frame_photo;   // NEW
+    photo_msg.header.frame_id.size     = strlen(frame_photo);
 
+    // IMU covariance
     imu_msg.orientation_covariance[0]         = -1.0;
     imu_msg.angular_velocity_covariance[0]    = 0.001;
     imu_msg.angular_velocity_covariance[4]    = 0.001;
@@ -352,6 +452,7 @@ void initHardware() {
     imu_msg.linear_acceleration_covariance[4] = 0.01;
     imu_msg.linear_acceleration_covariance[8] = 0.01;
 
+    // Odometry covariance
     odom_msg.pose.covariance[0]   = 0.01;
     odom_msg.pose.covariance[7]   = 0.01;
     odom_msg.pose.covariance[35]  = 0.05;
@@ -360,10 +461,56 @@ void initHardware() {
     odom_msg.twist.covariance[35] = 0.05;
 }
 
+// ── Light-triggered hardware test ─────────────────────────────
+// Blocks until the photoresistor sees light, then exercises
+// motors, collection motor, and both servos.
+void runLightTriggeredTest() {
+    Serial.println("[TEST] Waiting for light on photoresistor...");
+    while (!photoIsLight()) {
+        delay(50);
+    }
+    Serial.println("[TEST] Light detected — starting hardware test");
 
+    // Motor test at full speed
+    motorsSetSpeed(255);
+
+    Serial.println("[TEST] Motors FWD");
+    motorsFWD();   delay(600);
+    Serial.println("[TEST] Motors OFF");
+    motorsOFF();   delay(200);
+
+    Serial.println("[TEST] Motors BKWD");
+    motorsBKWD();  delay(600);
+    motorsOFF();   delay(200);
+
+    Serial.println("[TEST] Strafe LEFT");
+    motorsSTRAFE_LEFT();  delay(500);
+    motorsOFF();          delay(200);
+
+    Serial.println("[TEST] Strafe RIGHT");
+    motorsSTRAFE_RIGHT(); delay(500);
+    motorsOFF();          delay(200);
+
+    // Collection system on then off
+    Serial.println("[TEST] Collection ON");
+    GPIO.out1_w1ts.val = COLLECTION_MASK;
+    delay(1500);
+    Serial.println("[TEST] Collection OFF");
+    GPIO.out1_w1tc.val = COLLECTION_MASK;
+    delay(200);
+
+    // Servo rotation test (2 cycles, 400 ms dwell)
+    Serial.println("[TEST] Servo rotation test");
+    servoRotationTest(2, 400);
+
+    Serial.println("[TEST] Hardware test complete");
+}
+
+// ── Entry points ──────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     initHardware();
+    runLightTriggeredTest();
     set_microros_transports();
 }
 
