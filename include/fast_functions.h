@@ -50,8 +50,8 @@ constexpr uint8_t SERVO_ARM_PIN   = 33;    // Moved from 22 (I2C SCL conflict)
 
 static const uint16_t SERVO_MIN_US            = 500;
 static const uint16_t SERVO_MAX_US            = 2400;
-static const uint8_t  SERVO_DOOR_CLOSED_ANGLE = 0;
-static const uint8_t  SERVO_DOOR_OPEN_ANGLE   = 90;
+static const uint8_t  SERVO_DOOR_CLOSED_ANGLE = 90;
+static const uint8_t  SERVO_DOOR_OPEN_ANGLE   = 0;
 static const uint8_t  SERVO_ARM_HOME_ANGLE    = 0;
 static const uint8_t  SERVO_ARM_DROP_ANGLE    = 90;
 static const uint8_t  SERVO_ARM_LIFT_ANGLE    = 180;
